@@ -1,4 +1,5 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float
+from datetime import datetime, timezone
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./pedidos.db"
@@ -8,6 +9,10 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def hora_actual_utc():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class PedidoDB(Base):
@@ -25,6 +30,7 @@ class PedidoDB(Base):
     total = Column(Float, nullable=False)
     numero_guia = Column(String, nullable=True)
     estado = Column(String, default="PROCESANDO", nullable=False)
+    creado_en = Column(DateTime, default=hora_actual_utc, nullable=False)
 
 
 def crear_tablas():

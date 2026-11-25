@@ -1,13 +1,15 @@
 import os
+from datetime import timedelta
 from typing import List
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import PedidoDB, crear_tablas, get_db
+from database import PedidoDB, crear_tablas, get_db, hora_actual_utc
 from schemas import PedidoCreate, PedidoUpdate, PedidoResponse
 
 load_dotenv(dotenv_path="../.env")
@@ -49,9 +51,39 @@ def extraer_detalle_error(respuesta: httpx.Response, mensaje_defecto: str) -> st
         return mensaje_defecto
 
 
-# 1. CREATE (ORQUESTACIÓN SOA COMPLETA)
+# 1. CREATE (ORQUESTACIÓN SOA CON PREVENCIÓN DE DUPLICADOS)
 @app.post("/pedidos", response_model=PedidoResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(verificar_api_key)])
 def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
+    cliente_limpio = solicitud.cliente.strip()
+    direccion_limpia = solicitud.direccion.strip()
+
+    # PASO 0: Verificar si recién se creó un pedido idéntico en los últimos 60 segundos
+    ventana_tiempo = hora_actual_utc() - timedelta(seconds=60)
+    pedido_duplicado = (
+        db.query(PedidoDB)
+        .filter(
+            func.lower(PedidoDB.cliente) == cliente_limpio.lower(),
+            func.lower(PedidoDB.direccion) == direccion_limpia.lower(),
+            PedidoDB.zona == solicitud.zona,
+            PedidoDB.producto_id == solicitud.producto_id,
+            PedidoDB.cantidad == solicitud.cantidad,
+            PedidoDB.estado.in_(["PROCESANDO", "CONFIRMADO"]),
+            PedidoDB.creado_en >= ventana_tiempo,
+        )
+        .order_by(PedidoDB.id.desc())
+        .first()
+    )
+
+    if pedido_duplicado:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Alerta: Recién se había hecho un pedido idéntico "
+                f"(Pedido #{pedido_duplicado.id}, Guía: {pedido_duplicado.numero_guia or 'en proceso'}). "
+                f"Espera 1 minuto antes de repetir exactamente la misma orden."
+            ),
+        )
+
     headers_internos = {"x-api-key": API_KEY_ESPERADA}
 
     # PASO 1: Consultar producto y validar existencias en Servicio de Inventario (8001)
@@ -84,8 +116,8 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
 
     # PASO 2: Registrar orden preliminar en pedidos.db para obtener el ID de pedido
     nuevo_pedido = PedidoDB(
-        cliente=solicitud.cliente,
-        direccion=solicitud.direccion,
+        cliente=cliente_limpio,
+        direccion=direccion_limpia,
         zona=solicitud.zona,
         producto_id=solicitud.producto_id,
         producto_nombre=producto["nombre"],
@@ -105,8 +137,8 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
             f"{ENVIOS_URL}/envios",
             json={
                 "pedido_id": nuevo_pedido.id,
-                "destinatario": solicitud.cliente,
-                "direccion": solicitud.direccion,
+                "destinatario": cliente_limpio,
+                "direccion": direccion_limpia,
                 "zona": solicitud.zona
             },
             headers=headers_internos,
@@ -139,7 +171,6 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
             timeout=5.0
         )
     except httpx.RequestError:
-        # Compensación: cancelar el envío creado si Inventario falló
         httpx.put(
             f"{ENVIOS_URL}/envios/{datos_envio['id']}",
             json={"estado": "CANCELADO"},

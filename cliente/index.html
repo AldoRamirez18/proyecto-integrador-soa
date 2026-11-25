@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NovaStore | Plataforma de Integración SOA</title>
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --card: #ffffff;
+      --primary: #1e3a8a;
+      --primary-hover: #1d4ed8;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --ok: #16a34a;
+      --err: #dc2626;
+      --warn: #d97706;
+    }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    header {
+      background: var(--primary); color: #fff; padding: 16px 24px;
+      display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    .status-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 0.85rem; }
+    .badge { padding: 4px 10px; border-radius: 999px; font-weight: 600; background: #374151; }
+    .badge.online { background: var(--ok); }
+    .badge.offline { background: var(--err); }
+    .api-box { display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.12); padding: 4px 10px; border-radius: 6px; }
+    .api-box input { border: none; border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; width: 175px; }
+    .container { max-width: 1200px; margin: 20px auto; padding: 0 16px; display: grid; gap: 20px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .card h2 { margin: 0 0 14px; font-size: 1.05rem; color: var(--primary); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .form-group { margin-bottom: 12px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
+    input, select {
+      width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem;
+    }
+    button {
+      background: var(--primary); color: #fff; border: none; border-radius: 6px;
+      padding: 10px 14px; font-weight: 600; cursor: pointer; width: 100%; font-size: 0.9rem;
+    }
+    button:hover { background: var(--primary-hover); }
+    button.btn-sm { width: auto; padding: 5px 10px; font-size: 0.78rem; }
+    .alert { padding: 12px; border-radius: 6px; font-size: 0.88rem; margin-top: 12px; display: none; }
+    .alert.ok { display: block; background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .alert.err { display: block; background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .alert.warn { display: block; background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; font-weight: 600; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { background: #f9fafb; color: var(--muted); font-weight: 600; }
+    .tag { padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; background: #e0e7ff; color: var(--primary); }
+    .tag.cancel { background: #fee2e2; color: var(--err); }
+    .tag.done { background: #dcfce7; color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>NovaStore — Cliente Integrador SOA</h1>
+      <small style="opacity:0.85;">Orquestación de Inventario (8001) • Envíos (8002) • Pedidos (8003)</small>
+    </div>
+    <div class="status-bar">
+      <span id="st-inv" class="badge">Inventario: ...</span>
+      <span id="st-env" class="badge">Envíos: ...</span>
+      <span id="st-ped" class="badge">Pedidos: ...</span>
+      <div class="api-box">
+        <span>x-api-key:</span>
+        <input id="apiKeyInput" type="text" value="novastore-soa-2026" />
+        <button class="btn-sm" onclick="cargarTodo()">Actualizar</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="grid-2">
+      <!-- FORMULARIO ORQUESTADOR DE PEDIDOS -->
+      <div class="card">
+        <h2>1. Crear Pedido Integrado (POST :8003/pedidos)</h2>
+        <form id="formPedido">
+          <div class="form-group">
+            <label>Nombre del Cliente</label>
+            <input type="text" id="pedCliente" placeholder="Ej. Aldo Ramírez" required />
+          </div>
+          <div class="form-group">
+            <label>Dirección de Entrega</label>
+            <input type="text" id="pedDireccion" placeholder="Ej. Av. Juárez 123, Puebla" required />
+          </div>
+          <div class="grid-2" style="gap:10px;">
+            <div class="form-group">
+              <label>Zona de Envío</label>
+              <select id="pedZona">
+                <option value="LOCAL">LOCAL ($50.00)</option>
+                <option value="NACIONAL">NACIONAL ($120.00)</option>
+                <option value="EXPRESS">EXPRESS ($200.00)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Cantidad</label>
+              <input type="number" id="pedCantidad" min="1" value="1" required />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Producto (Catálogo desde :8001)</label>
+            <select id="pedProducto" required></select>
+          </div>
+          <button type="submit">Procesar Compra SOA</button>
+        </form>
+        <div id="alertPedido" class="alert"></div>
+      </div>
+
+      <!-- FORMULARIO ALTA DE INVENTARIO -->
+      <div class="card">
+        <h2>2. Registrar Producto (POST :8001/productos)</h2>
+        <form id="formProducto">
+          <div class="form-group">
+            <label>Nombre del Producto</label>
+            <input type="text" id="prodNombre" placeholder="Ej. Monitor Gamer 24&quot;" required />
+          </div>
+          <div class="form-group">
+            <label>Descripción</label>
+            <input type="text" id="prodDesc" placeholder="Ej. Panel IPS 144Hz" />
+          </div>
+          <div class="grid-2" style="gap:10px;">
+            <div class="form-group">
+              <label>Precio ($ MXN)</label>
+              <input type="number" id="prodPrecio" step="0.01" min="0.01" placeholder="3500.00" required />
+            </div>
+            <div class="form-group">
+              <label>Stock Inicial</label>
+              <input type="number" id="prodStock" min="0" value="10" required />
+            </div>
+          </div>
+          <button type="submit">Agregar al Inventario</button>
+        </form>
+        <div id="alertProducto" class="alert"></div>
+      </div>
+    </div>
+
+    <!-- TABLA INVENTARIO -->
+    <div class="card">
+      <h2>Inventario en Tiempo Real (Base de datos: inventario.db — Puerto 8001)</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Producto</th><th>Descripción</th><th>Precio</th><th>Stock Disponible</th></tr>
+        </thead>
+        <tbody id="tablaInventario"></tbody>
+      </table>
+    </div>
+
+    <!-- TABLA PEDIDOS -->
+    <div class="card">
+      <h2>Pedidos Orquestados (Base de datos: pedidos.db — Puerto 8003)</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Cliente</th><th>Producto</th><th>Cant.</th><th>Subtotal</th><th>Envío</th><th>Total</th><th>Guía</th><th>Estado</th></tr>
+        </thead>
+        <tbody id="tablaPedidos"></tbody>
+      </table>
+    </div>
+
+    <!-- TABLA ENVIOS -->
+    <div class="card">
+      <h2>Logística y Guías de Envío (Base de datos: envios.db — Puerto 8002)</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Pedido #</th><th>Guía</th><th>Destinatario</th><th>Zona</th><th>Costo</th><th>Estado</th><th>Acción</th></tr>
+        </thead>
+        <tbody id="tablaEnvios"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const URL_INV = "http://127.0.0.1:8001";
+    const URL_ENV = "http://127.0.0.1:8002";
+    const URL_PED = "http://127.0.0.1:8003";
+
+    function getHeaders() {
+      return {
+        "Content-Type": "application/json",
+        "x-api-key": document.getElementById("apiKeyInput").value.trim()
+      };
+    }
+
+    function mostrarAlerta(id, tipo, mensaje) {
+      const el = document.getElementById(id);
+      el.className = `alert ${tipo}`;
+      el.textContent = mensaje;
+    }
+
+    function setBadge(id, label, online) {
+      const el = document.getElementById(id);
+      el.textContent = `${label}: ${online ? "EN LÍNEA" : "SIN CONEXIÓN"}`;
+      el.className = `badge ${online ? "online" : "offline"}`;
+    }
+
+    async function cargarInventario() {
+      try {
+        const res = await fetch(`${URL_INV}/productos`, { headers: getHeaders() });
+        setBadge("st-inv", "Inventario (8001)", true);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(`HTTP ${res.status}: ${err.detail}`);
+        }
+        const productos = await res.json();
+        const tbody = document.getElementById("tablaInventario");
+        const select = document.getElementById("pedProducto");
+        tbody.innerHTML = "";
+        select.innerHTML = "";
+
+        productos.forEach(p => {
+          tbody.innerHTML += `<tr>
+            <td>${p.id}</td><td><strong>${p.nombre}</strong></td><td>${p.descripcion || "-"}</td>
+            <td>$${p.precio.toFixed(2)}</td><td><strong>${p.stock}</strong> uds.</td>
+          </tr>`;
+          select.innerHTML += `<option value="${p.id}">#${p.id} - ${p.nombre} ($${p.precio.toFixed(2)} | Stock: ${p.stock})</option>`;
+        });
+      } catch (e) {
+        if (e.message.includes("Failed to fetch")) setBadge("st-inv", "Inventario (8001)", false);
+        document.getElementById("tablaInventario").innerHTML = `<tr><td colspan="5" style="color:var(--err);">${e.message}</td></tr>`;
+      }
+    }
+
+    async function cargarPedidos() {
+      try {
+        const res = await fetch(`${URL_PED}/pedidos`, { headers: getHeaders() });
+        setBadge("st-ped", "Pedidos (8003)", true);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(`HTTP ${res.status}: ${err.detail}`);
+        }
+        const pedidos = await res.json();
+        const tbody = document.getElementById("tablaPedidos");
+        tbody.innerHTML = "";
+        pedidos.forEach(p => {
+          const cls = p.estado === "CANCELADO" ? "cancel" : (p.estado === "CONFIRMADO" ? "done" : "");
+          tbody.innerHTML += `<tr>
+            <td>${p.id}</td><td>${p.cliente}</td><td>${p.producto_nombre}</td><td>${p.cantidad}</td>
+            <td>$${p.subtotal.toFixed(2)}</td><td>$${p.costo_envio.toFixed(2)}</td><td><strong>$${p.total.toFixed(2)}</strong></td>
+            <td><code>${p.numero_guia || "-"}</code></td><td><span class="tag ${cls}">${p.estado}</span></td>
+          </tr>`;
+        });
+      } catch (e) {
+        if (e.message.includes("Failed to fetch")) setBadge("st-ped", "Pedidos (8003)", false);
+        document.getElementById("tablaPedidos").innerHTML = `<tr><td colspan="9" style="color:var(--err);">${e.message}</td></tr>`;
+      }
+    }
+
+    async function cargarEnvios() {
+      try {
+        const res = await fetch(`${URL_ENV}/envios`, { headers: getHeaders() });
+        setBadge("st-env", "Envíos (8002)", true);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(`HTTP ${res.status}: ${err.detail}`);
+        }
+        const envios = await res.json();
+        const tbody = document.getElementById("tablaEnvios");
+        tbody.innerHTML = "";
+        envios.forEach(env => {
+          const cls = env.estado === "CANCELADO" ? "cancel" : (env.estado === "ENTREGADO" ? "done" : "");
+          const btnSiguiente = env.estado === "PREPARANDO"
+            ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.id}, 'EN_RUTA')">Marcar En Ruta</button>`
+            : (env.estado === "EN_RUTA"
+              ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.id}, 'ENTREGADO')">Marcar Entregado</button>`
+              : "-");
+          tbody.innerHTML += `<tr>
+            <td>${env.id}</td><td>#${env.pedido_id}</td><td><code>${env.numero_guia}</code></td>
+            <td>${env.destinatario}</td><td>${env.zona}</td><td>$${env.costo_envio.toFixed(2)}</td>
+            <td><span class="tag ${cls}">${env.estado}</span></td><td>${btnSiguiente}</td>
+          </tr>`;
+        });
+      } catch (e) {
+        if (e.message.includes("Failed to fetch")) setBadge("st-env", "Envíos (8002)", false);
+        document.getElementById("tablaEnvios").innerHTML = `<tr><td colspan="8" style="color:var(--err);">${e.message}</td></tr>`;
+      }
+    }
+
+    async function cambiarEstadoEnvio(id, nuevoEstado) {
+      await fetch(`${URL_ENV}/envios/${id}`, {
+        method: "PUT",
+        headers: getHeaders(),
+        body: JSON.stringify({ estado: nuevoEstado })
+      });
+      cargarEnvios();
+    }
+
+    document.getElementById("formProducto").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        nombre: document.getElementById("prodNombre").value,
+        descripcion: document.getElementById("prodDesc").value || null,
+        precio: parseFloat(document.getElementById("prodPrecio").value),
+        stock: parseInt(document.getElementById("prodStock").value, 10)
+      };
+      try {
+        const res = await fetch(`${URL_INV}/productos`, {
+          method: "POST", headers: getHeaders(), body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.detail || JSON.stringify(data)}`);
+        mostrarAlerta("alertProducto", "ok", `Producto '${data.nombre}' registrado con ID #${data.id}.`);
+        e.target.reset();
+        cargarInventario();
+      } catch (err) {
+        mostrarAlerta("alertProducto", "err", err.message);
+      }
+    });
+
+    document.getElementById("formPedido").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector("button[type='submit']");
+      btn.disabled = true;
+      btn.textContent = "Procesando compra...";
+
+      const payload = {
+        cliente: document.getElementById("pedCliente").value,
+        direccion: document.getElementById("pedDireccion").value,
+        zona: document.getElementById("pedZona").value,
+        producto_id: parseInt(document.getElementById("pedProducto").value, 10),
+        cantidad: parseInt(document.getElementById("pedCantidad").value, 10)
+      };
+
+      try {
+        const res = await fetch(`${URL_PED}/pedidos`, {
+          method: "POST", headers: getHeaders(), body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.status === 409) {
+          mostrarAlerta("alertPedido", "warn", data.detail);
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.detail || JSON.stringify(data)}`);
+        mostrarAlerta("alertPedido", "ok", `Pedido #${data.id} CONFIRMADO. Guía: ${data.numero_guia} | Total: $${data.total.toFixed(2)}`);
+        cargarTodo();
+      } catch (err) {
+        mostrarAlerta("alertPedido", "err", err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Procesar Compra SOA";
+      }
+    });
+
+    function cargarTodo() {
+      cargarInventario();
+      cargarPedidos();
+      cargarEnvios();
+    }
+
+    cargarTodo();
+  </script>
+</body>
+</html>
