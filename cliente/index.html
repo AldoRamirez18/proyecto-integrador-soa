@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovaStore | Plataforma de Integración SOA</title>
+  <title>NovaStore</title>
   <style>
     :root {
       --bg: #f4f6f9;
@@ -44,12 +44,19 @@
       padding: 10px 14px; font-weight: 600; cursor: pointer; width: 100%; font-size: 0.9rem;
     }
     button:hover { background: var(--primary-hover); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
     button.btn-sm { width: auto; padding: 5px 10px; font-size: 0.78rem; }
+    .acciones-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+    button.btn-warn { background: var(--warn); }
+    button.btn-warn:hover { background: #b45309; }
+    button.btn-danger { background: var(--err); }
+    button.btn-danger:hover { background: #b91c1c; }
+    button.btn-secondary { background: var(--muted); }
+    button.btn-secondary:hover { background: #4b5563; }
     .alert { padding: 12px; border-radius: 6px; font-size: 0.88rem; margin-top: 12px; display: none; }
     .alert.ok { display: block; background: #dcfce7; color: #166534; border: 1px solid #86efac; }
     .alert.err { display: block; background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
     .alert.warn { display: block; background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; font-weight: 600; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
     th { background: #f9fafb; color: var(--muted); font-weight: 600; }
@@ -113,10 +120,11 @@
         <div id="alertPedido" class="alert"></div>
       </div>
 
-      <!-- FORMULARIO ALTA DE INVENTARIO -->
-      <div class="card">
-        <h2>2. Registrar Producto (POST :8001/productos)</h2>
+      <!-- FORMULARIO ALTA / EDICIÓN DE INVENTARIO -->
+      <div class="card" id="cardFormProducto">
+        <h2 id="tituloFormProducto">2. Registrar Producto (POST :8001/productos)</h2>
         <form id="formProducto">
+          <input type="hidden" id="prodEditId" value="" />
           <div class="form-group">
             <label>Nombre del Producto</label>
             <input type="text" id="prodNombre" placeholder="Ej. Monitor Gamer 24&quot;" required />
@@ -135,7 +143,10 @@
               <input type="number" id="prodStock" min="0" value="10" required />
             </div>
           </div>
-          <button type="submit">Agregar al Inventario</button>
+          <div style="display:flex; gap:10px;">
+            <button type="submit" id="btnSubmitProducto">Agregar al Inventario</button>
+            <button type="button" id="btnCancelarEdicion" class="btn-secondary" style="display:none;" onclick="cancelarEdicion()">Cancelar</button>
+          </div>
         </form>
         <div id="alertProducto" class="alert"></div>
       </div>
@@ -144,9 +155,10 @@
     <!-- TABLA INVENTARIO -->
     <div class="card">
       <h2>Inventario en Tiempo Real (Base de datos: inventario.db — Puerto 8001)</h2>
+      <div id="alertInventario" class="alert" style="margin-top:0; margin-bottom:12px;"></div>
       <table>
         <thead>
-          <tr><th>ID</th><th>Producto</th><th>Descripción</th><th>Precio</th><th>Stock Disponible</th></tr>
+          <tr><th>ID</th><th>Producto</th><th>Descripción</th><th>Precio</th><th>Stock Disponible</th><th>Acciones</th></tr>
         </thead>
         <tbody id="tablaInventario"></tbody>
       </table>
@@ -180,6 +192,8 @@
     const URL_ENV = "http://127.0.0.1:8002";
     const URL_PED = "http://127.0.0.1:8003";
 
+    let catalogoInventario = [];
+
     function getHeaders() {
       return {
         "Content-Type": "application/json",
@@ -207,22 +221,78 @@
           const err = await res.json();
           throw new Error(`HTTP ${res.status}: ${err.detail}`);
         }
-        const productos = await res.json();
+        catalogoInventario = await res.json();
         const tbody = document.getElementById("tablaInventario");
         const select = document.getElementById("pedProducto");
         tbody.innerHTML = "";
         select.innerHTML = "";
 
-        productos.forEach(p => {
+        catalogoInventario.forEach(p => {
           tbody.innerHTML += `<tr>
-            <td>${p.id}</td><td><strong>${p.nombre}</strong></td><td>${p.descripcion || "-"}</td>
-            <td>$${p.precio.toFixed(2)}</td><td><strong>${p.stock}</strong> uds.</td>
+            <td>${p.id}</td>
+            <td><strong>${p.nombre}</strong></td>
+            <td>${p.descripcion || "-"}</td>
+            <td>$${p.precio.toFixed(2)}</td>
+            <td><strong>${p.stock}</strong> uds.</td>
+            <td class="acciones-cell">
+              <button type="button" class="btn-sm btn-warn" onclick="prepararEdicion(${p.id})">Editar</button>
+              <button type="button" class="btn-sm btn-danger" onclick="eliminarProducto(${p.id})">Eliminar</button>
+            </td>
           </tr>`;
           select.innerHTML += `<option value="${p.id}">#${p.id} - ${p.nombre} ($${p.precio.toFixed(2)} | Stock: ${p.stock})</option>`;
         });
       } catch (e) {
         if (e.message.includes("Failed to fetch")) setBadge("st-inv", "Inventario (8001)", false);
-        document.getElementById("tablaInventario").innerHTML = `<tr><td colspan="5" style="color:var(--err);">${e.message}</td></tr>`;
+        document.getElementById("tablaInventario").innerHTML = `<tr><td colspan="6" style="color:var(--err);">${e.message}</td></tr>`;
+      }
+    }
+
+    function prepararEdicion(id) {
+      const producto = catalogoInventario.find(p => p.id === id);
+      if (!producto) return;
+
+      document.getElementById("prodEditId").value = producto.id;
+      document.getElementById("prodNombre").value = producto.nombre;
+      document.getElementById("prodDesc").value = producto.descripcion || "";
+      document.getElementById("prodPrecio").value = producto.precio;
+      document.getElementById("prodStock").value = producto.stock;
+
+      document.getElementById("tituloFormProducto").textContent = `2. Editar Producto #${producto.id} (PUT :8001/productos/${producto.id})`;
+      document.getElementById("btnSubmitProducto").textContent = "Guardar Cambios";
+      document.getElementById("btnCancelarEdicion").style.display = "block";
+      document.getElementById("alertProducto").className = "alert";
+      document.getElementById("cardFormProducto").scrollIntoView({ behavior: "smooth" });
+    }
+
+    function cancelarEdicion() {
+      document.getElementById("formProducto").reset();
+      document.getElementById("prodEditId").value = "";
+      document.getElementById("tituloFormProducto").textContent = "2. Registrar Producto (POST :8001/productos)";
+      document.getElementById("btnSubmitProducto").textContent = "Agregar al Inventario";
+      document.getElementById("btnCancelarEdicion").style.display = "none";
+    }
+
+    async function eliminarProducto(id) {
+      const producto = catalogoInventario.find(p => p.id === id);
+      const nombre = producto ? producto.nombre : `#${id}`;
+      if (!confirm(`¿Seguro que deseas eliminar "${nombre}" del inventario?`)) return;
+
+      try {
+        const res = await fetch(`${URL_INV}/productos/${id}`, {
+          method: "DELETE",
+          headers: getHeaders()
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(`HTTP ${res.status}: ${data.detail || "No se pudo eliminar el producto."}`);
+        }
+        if (document.getElementById("prodEditId").value === String(id)) {
+          cancelarEdicion();
+        }
+        mostrarAlerta("alertInventario", "ok", `Producto "${nombre}" eliminado correctamente (HTTP 204).`);
+        cargarInventario();
+      } catch (err) {
+        mostrarAlerta("alertInventario", "err", err.message);
       }
     }
 
@@ -292,20 +362,32 @@
 
     document.getElementById("formProducto").addEventListener("submit", async (e) => {
       e.preventDefault();
+      const editId = document.getElementById("prodEditId").value;
+      const esEdicion = Boolean(editId);
+
       const payload = {
         nombre: document.getElementById("prodNombre").value,
         descripcion: document.getElementById("prodDesc").value || null,
         precio: parseFloat(document.getElementById("prodPrecio").value),
         stock: parseInt(document.getElementById("prodStock").value, 10)
       };
+
+      const url = esEdicion ? `${URL_INV}/productos/${editId}` : `${URL_INV}/productos`;
+      const method = esEdicion ? "PUT" : "POST";
+
       try {
-        const res = await fetch(`${URL_INV}/productos`, {
-          method: "POST", headers: getHeaders(), body: JSON.stringify(payload)
+        const res = await fetch(url, {
+          method, headers: getHeaders(), body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.detail || JSON.stringify(data)}`);
-        mostrarAlerta("alertProducto", "ok", `Producto '${data.nombre}' registrado con ID #${data.id}.`);
-        e.target.reset();
+
+        const msg = esEdicion
+          ? `Producto #${data.id} ("${data.nombre}") actualizado correctamente.`
+          : `Producto '${data.nombre}' registrado con ID #${data.id}.`;
+
+        mostrarAlerta("alertProducto", "ok", msg);
+        cancelarEdicion();
         cargarInventario();
       } catch (err) {
         mostrarAlerta("alertProducto", "err", err.message);
