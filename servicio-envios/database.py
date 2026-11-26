@@ -23,6 +23,13 @@ class EnvioDB(Base):
     estado = Column(String, default="PREPARANDO", nullable=False)
 
 
+class EnvioPedidoDB(Base):
+    __tablename__ = "envios_por_pedido"
+
+    pedido_id = Column(Integer, primary_key=True)
+    envio_id = Column(Integer, unique=True, nullable=False)
+
+
 def crear_tablas():
     Base.metadata.create_all(bind=engine)
 

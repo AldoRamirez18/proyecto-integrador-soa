@@ -11,7 +11,7 @@ class PedidoCreate(BaseModel):
 
 
 class PedidoUpdate(BaseModel):
-    estado: Literal["CONFIRMADO", "EN_CAMINO", "ENTREGADO", "CANCELADO"]
+    estado: Literal["EN_CAMINO", "ENTREGADO"]
 
 
 class PedidoResponse(BaseModel):

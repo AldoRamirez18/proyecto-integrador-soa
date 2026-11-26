@@ -5,9 +5,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import EnvioDB, crear_tablas, get_db
+from database import EnvioDB, EnvioPedidoDB, crear_tablas, get_db
 from schemas import EnvioCreate, EnvioUpdate, EnvioResponse
 
 load_dotenv(dotenv_path="../.env")
@@ -49,6 +50,33 @@ def verificar_api_key(api_key: str = Security(api_key_header)):
 # 1. CREATE - Generar solicitud de envío, calcular costo y asignar guía
 @app.post("/envios", response_model=EnvioResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(verificar_api_key)])
 def crear_envio(envio: EnvioCreate, db: Session = Depends(get_db)):
+    relacion = db.query(EnvioPedidoDB).filter(
+        EnvioPedidoDB.pedido_id == envio.pedido_id
+    ).first()
+    envios_existentes = [] if relacion else db.query(EnvioDB).filter(
+        EnvioDB.pedido_id == envio.pedido_id
+    ).order_by(EnvioDB.id.asc()).all()
+    if not relacion and len(envios_existentes) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"El pedido {envio.pedido_id} tiene envíos históricos duplicados y requiere revisión.",
+        )
+    existente = (
+        db.query(EnvioDB).filter(EnvioDB.id == relacion.envio_id).first()
+        if relacion
+        else (envios_existentes[0] if envios_existentes else None)
+    )
+    if existente:
+        if (
+            existente.destinatario != envio.destinatario
+            or existente.direccion != envio.direccion
+            or existente.zona != envio.zona
+        ):
+            raise HTTPException(status_code=409, detail="El pedido ya tiene un envío con datos diferentes.")
+        if existente.estado == "CANCELADO":
+            raise HTTPException(status_code=409, detail="El envío de este pedido ya fue cancelado.")
+        return existente
+
     costo = TARIFAS_ZONA[envio.zona]
     guia = f"NV-{uuid.uuid4().hex[:8].upper()}"
 
@@ -62,7 +90,29 @@ def crear_envio(envio: EnvioCreate, db: Session = Depends(get_db)):
         estado="PREPARANDO"
     )
     db.add(nuevo_envio)
-    db.commit()
+    db.flush()
+    db.add(EnvioPedidoDB(pedido_id=envio.pedido_id, envio_id=nuevo_envio.id))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        relacion = db.query(EnvioPedidoDB).filter(
+            EnvioPedidoDB.pedido_id == envio.pedido_id
+        ).first()
+        if not relacion:
+            raise
+        existente = db.query(EnvioDB).filter(EnvioDB.id == relacion.envio_id).first()
+        if not existente:
+            raise
+        if (
+            existente.destinatario != envio.destinatario
+            or existente.direccion != envio.direccion
+            or existente.zona != envio.zona
+        ):
+            raise HTTPException(status_code=409, detail="El pedido ya tiene un envío con datos diferentes.")
+        if existente.estado == "CANCELADO":
+            raise HTTPException(status_code=409, detail="El envío de este pedido ya fue cancelado.")
+        return existente
     db.refresh(nuevo_envio)
     return nuevo_envio
 
@@ -82,6 +132,26 @@ def obtener_envio(envio_id: int, db: Session = Depends(get_db)):
     return envio
 
 
+@app.get("/envios/pedido/{pedido_id}", response_model=EnvioResponse, dependencies=[Depends(verificar_api_key)])
+def obtener_envio_por_pedido(pedido_id: int, db: Session = Depends(get_db)):
+    relacion = db.query(EnvioPedidoDB).filter(
+        EnvioPedidoDB.pedido_id == pedido_id
+    ).first()
+    if relacion:
+        envio = db.query(EnvioDB).filter(EnvioDB.id == relacion.envio_id).first()
+    else:
+        envios = db.query(EnvioDB).filter(EnvioDB.pedido_id == pedido_id).all()
+        if len(envios) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"El pedido {pedido_id} tiene envíos históricos duplicados y requiere revisión.",
+            )
+        envio = envios[0] if envios else None
+    if not envio:
+        raise HTTPException(status_code=404, detail=f"No hay envío para el pedido {pedido_id}.")
+    return envio
+
+
 # 4. UPDATE - Actualizar estado de entrega o dirección
 @app.put("/envios/{envio_id}", response_model=EnvioResponse, dependencies=[Depends(verificar_api_key)])
 def actualizar_envio(envio_id: int, datos: EnvioUpdate, db: Session = Depends(get_db)):
@@ -89,7 +159,21 @@ def actualizar_envio(envio_id: int, datos: EnvioUpdate, db: Session = Depends(ge
     if not envio:
         raise HTTPException(status_code=404, detail=f"Envío con ID {envio_id} no encontrado.")
 
-    for campo, valor in datos.model_dump(exclude_unset=True).items():
+    cambios = datos.model_dump(exclude_unset=True)
+    transiciones = {
+        "PREPARANDO": {"EN_RUTA", "CANCELADO"},
+        "EN_RUTA": {"ENTREGADO", "CANCELADO"},
+        "ENTREGADO": set(),
+        "CANCELADO": set(),
+    }
+    if "estado" in cambios and cambios["estado"] != envio.estado:
+        if cambios["estado"] not in transiciones[envio.estado]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No se puede cambiar el envío de {envio.estado} a {cambios['estado']}."
+            )
+
+    for campo, valor in cambios.items():
         setattr(envio, campo, valor)
 
     db.commit()
@@ -104,6 +188,11 @@ def eliminar_envio(envio_id: int, db: Session = Depends(get_db)):
     if not envio:
         raise HTTPException(status_code=404, detail=f"Envío con ID {envio_id} no encontrado.")
 
+    relacion = db.query(EnvioPedidoDB).filter(
+        EnvioPedidoDB.envio_id == envio_id
+    ).first()
+    if relacion:
+        db.delete(relacion)
     db.delete(envio)
     db.commit()
     return None

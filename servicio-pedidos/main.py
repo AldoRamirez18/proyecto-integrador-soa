@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database import PedidoDB, crear_tablas, get_db, hora_actual_utc
@@ -51,6 +52,53 @@ def extraer_detalle_error(respuesta: httpx.Response, mensaje_defecto: str) -> st
         return mensaje_defecto
 
 
+def marcar_pedido(db: Session, pedido: PedidoDB, estado: str) -> None:
+    pedido.estado = estado
+    db.commit()
+
+
+def liberar_reserva(producto_id: int, pedido_id: int, headers: dict) -> None:
+    try:
+        respuesta = httpx.post(
+            f"{INVENTARIO_URL}/productos/{producto_id}/reservas/{pedido_id}/liberar",
+            headers=headers,
+            timeout=5.0,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No fue posible confirmar la liberación de inventario.",
+        ) from exc
+
+    if respuesta.status_code not in (200, 404):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=extraer_detalle_error(respuesta, "No fue posible liberar el inventario."),
+        )
+
+
+def cancelar_pedido_sin_envio(
+    db: Session,
+    pedido: PedidoDB,
+    producto_id: int,
+    headers: dict,
+) -> None:
+    try:
+        liberar_reserva(producto_id, pedido.id, headers)
+    except HTTPException:
+        marcar_pedido(db, pedido, "REQUIERE_REVISION")
+        raise
+    marcar_pedido(db, pedido, "CANCELADO")
+
+
+def obtener_envio_existente(pedido_id: int, headers: dict) -> httpx.Response:
+    return httpx.get(
+        f"{ENVIOS_URL}/envios/pedido/{pedido_id}",
+        headers=headers,
+        timeout=5.0,
+    )
+
+
 # 1. CREATE (ORQUESTACIÓN SOA CON PREVENCIÓN DE DUPLICADOS)
 @app.post("/pedidos", response_model=PedidoResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(verificar_api_key)])
 def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
@@ -67,8 +115,13 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
             PedidoDB.zona == solicitud.zona,
             PedidoDB.producto_id == solicitud.producto_id,
             PedidoDB.cantidad == solicitud.cantidad,
-            PedidoDB.estado.in_(["PROCESANDO", "CONFIRMADO"]),
-            PedidoDB.creado_en >= ventana_tiempo,
+            or_(
+                and_(
+                    PedidoDB.estado.in_(["PROCESANDO", "CONFIRMADO", "EN_CAMINO"]),
+                    PedidoDB.creado_en >= ventana_tiempo,
+                ),
+                PedidoDB.estado == "REQUIERE_REVISION",
+            ),
         )
         .order_by(PedidoDB.id.desc())
         .first()
@@ -106,12 +159,6 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
         )
 
     producto = resp_inv.json()
-    if producto["stock"] < solicitud.cantidad:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Stock insuficiente para '{producto['nombre']}'. Disponible: {producto['stock']}, solicitado: {solicitud.cantidad}."
-        )
-
     subtotal = round(producto["precio"] * solicitud.cantidad, 2)
 
     # PASO 2: Registrar orden preliminar en pedidos.db para obtener el ID de pedido
@@ -131,7 +178,52 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nuevo_pedido)
 
-    # PASO 3: Solicitar cálculo de tarifa y guía al Servicio de Envíos (8002)
+    # PASO 3: Reservar stock de forma idempotente antes de crear el envío
+    try:
+        resp_reserva = httpx.post(
+            f"{INVENTARIO_URL}/productos/{solicitud.producto_id}/reservas",
+            json={
+                "pedido_id": nuevo_pedido.id,
+                "cantidad": solicitud.cantidad,
+            },
+            headers=headers_internos,
+            timeout=5.0
+        )
+    except httpx.RequestError:
+        try:
+            resp_reserva = httpx.post(
+                f"{INVENTARIO_URL}/productos/{solicitud.producto_id}/reservas",
+                json={"pedido_id": nuevo_pedido.id, "cantidad": solicitud.cantidad},
+                headers=headers_internos,
+                timeout=5.0,
+            )
+        except httpx.RequestError:
+            try:
+                cancelar_pedido_sin_envio(db, nuevo_pedido, solicitud.producto_id, headers_internos)
+            except HTTPException:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se pudo confirmar la reserva ni liberar el inventario. Pedido marcado para revisión.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El Servicio de Inventario no respondió. Se verificó la liberación y se canceló el pedido.",
+            )
+
+    if resp_reserva.status_code != status.HTTP_201_CREATED:
+        try:
+            cancelar_pedido_sin_envio(db, nuevo_pedido, solicitud.producto_id, headers_internos)
+        except HTTPException:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="La reserva falló y no se pudo confirmar la liberación. Pedido marcado para revisión.",
+            )
+        raise HTTPException(
+            status_code=resp_reserva.status_code,
+            detail=extraer_detalle_error(resp_reserva, "No se pudo reservar el inventario."),
+        )
+
+    # PASO 4: Crear el envío; el pedido_id hace segura la repetición si se pierde la respuesta
     try:
         resp_env = httpx.post(
             f"{ENVIOS_URL}/envios",
@@ -145,77 +237,112 @@ def crear_pedido(solicitud: PedidoCreate, db: Session = Depends(get_db)):
             timeout=5.0
         )
     except httpx.RequestError:
-        nuevo_pedido.estado = "CANCELADO"
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Error de integración: el Servicio de Envíos (8002) no está disponible. Pedido cancelado."
-        )
+        try:
+            resp_env = obtener_envio_existente(nuevo_pedido.id, headers_internos)
+        except httpx.RequestError:
+            marcar_pedido(db, nuevo_pedido, "REQUIERE_REVISION")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudo confirmar si Envíos creó la guía. Se conserva la reserva y el pedido requiere revisión.",
+            )
 
-    if resp_env.status_code != 201:
-        nuevo_pedido.estado = "CANCELADO"
-        db.commit()
-        raise HTTPException(
-            status_code=resp_env.status_code,
-            detail=extraer_detalle_error(resp_env, "Error al generar el envío.")
-        )
+        if resp_env.status_code == status.HTTP_404_NOT_FOUND:
+            try:
+                cancelar_pedido_sin_envio(db, nuevo_pedido, solicitud.producto_id, headers_internos)
+            except HTTPException:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se creó el envío y no se pudo liberar el inventario. Pedido marcado para revisión.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El Servicio de Envíos no respondió. Se liberó la reserva y se canceló el pedido.",
+            )
 
-    datos_envio = resp_env.json()
+    if resp_env.status_code not in (status.HTTP_200_OK, status.HTTP_201_CREATED):
+        try:
+            comprobacion_envio = obtener_envio_existente(nuevo_pedido.id, headers_internos)
+        except httpx.RequestError:
+            marcar_pedido(db, nuevo_pedido, "REQUIERE_REVISION")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudo verificar el envío. Se conserva la reserva y el pedido requiere revisión.",
+            )
 
-    # PASO 4: Descontar stock en Servicio de Inventario (8001)
+        if comprobacion_envio.status_code == status.HTTP_200_OK:
+            resp_env = comprobacion_envio
+        elif comprobacion_envio.status_code != status.HTTP_404_NOT_FOUND:
+            marcar_pedido(db, nuevo_pedido, "REQUIERE_REVISION")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Envíos devolvió un error y no se pudo confirmar el resultado. Pedido marcado para revisión.",
+            )
+        else:
+            try:
+                cancelar_pedido_sin_envio(db, nuevo_pedido, solicitud.producto_id, headers_internos)
+            except HTTPException:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No se creó el envío y no se pudo liberar el inventario. Pedido marcado para revisión.",
+                )
+            raise HTTPException(
+                status_code=resp_env.status_code,
+                detail=extraer_detalle_error(resp_env, "Error al generar el envío. Se liberó la reserva y se canceló el pedido."),
+            )
+
     try:
-        resp_desc = httpx.patch(
-            f"{INVENTARIO_URL}/productos/{solicitud.producto_id}/descontar",
-            json={"cantidad": solicitud.cantidad},
-            headers=headers_internos,
-            timeout=5.0
-        )
-    except httpx.RequestError:
-        httpx.put(
-            f"{ENVIOS_URL}/envios/{datos_envio['id']}",
-            json={"estado": "CANCELADO"},
-            headers=headers_internos,
-            timeout=5.0
-        )
-        nuevo_pedido.estado = "CANCELADO"
-        db.commit()
+        datos_envio = resp_env.json()
+        envio_id = int(datos_envio["id"])
+        costo_envio = float(datos_envio["costo_envio"])
+        numero_guia = str(datos_envio["numero_guia"])
+    except (KeyError, TypeError, ValueError) as exc:
+        marcar_pedido(db, nuevo_pedido, "REQUIERE_REVISION")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Fallo al descontar stock en Inventario. Se revirtió el envío y se canceló el pedido."
-        )
-
-    if resp_desc.status_code != 200:
-        httpx.put(
-            f"{ENVIOS_URL}/envios/{datos_envio['id']}",
-            json={"estado": "CANCELADO"},
-            headers=headers_internos,
-            timeout=5.0
-        )
-        nuevo_pedido.estado = "CANCELADO"
-        db.commit()
-        raise HTTPException(
-            status_code=resp_desc.status_code,
-            detail=extraer_detalle_error(resp_desc, "No se pudo descontar el stock.")
-        )
+            detail="Envíos devolvió una respuesta inválida. Se conserva la reserva y el pedido requiere revisión.",
+        ) from exc
 
     # PASO 5: Confirmar pedido con totales reales y número de guía
-    nuevo_pedido.costo_envio = datos_envio["costo_envio"]
-    nuevo_pedido.total = round(subtotal + datos_envio["costo_envio"], 2)
-    nuevo_pedido.numero_guia = datos_envio["numero_guia"]
+    nuevo_pedido.costo_envio = costo_envio
+    nuevo_pedido.total = round(subtotal + costo_envio, 2)
+    nuevo_pedido.numero_guia = numero_guia
     nuevo_pedido.estado = "CONFIRMADO"
 
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        try:
+            cancelacion = httpx.put(
+                f"{ENVIOS_URL}/envios/{envio_id}",
+                json={"estado": "CANCELADO"},
+                headers=headers_internos,
+                timeout=5.0,
+            )
+            if cancelacion.status_code != status.HTTP_200_OK:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No se pudo cancelar el envío.")
+            liberar_reserva(solicitud.producto_id, nuevo_pedido.id, headers_internos)
+        except (httpx.RequestError, HTTPException):
+            marcar_pedido(db, nuevo_pedido, "REQUIERE_REVISION")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Falló el registro del pedido y no se pudo completar la compensación. Pedido marcado para revisión.",
+            ) from exc
+        marcar_pedido(db, nuevo_pedido, "CANCELADO")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falló el registro del pedido; se canceló el envío y se liberó el inventario.",
+        ) from exc
+
     db.refresh(nuevo_pedido)
     return nuevo_pedido
 
 
-# 2. READ ALL - Listar todos los pedidos
 @app.get("/pedidos", response_model=List[PedidoResponse], dependencies=[Depends(verificar_api_key)])
 def listar_pedidos(db: Session = Depends(get_db)):
     return db.query(PedidoDB).all()
 
 
-# 3. READ ONE - Consultar pedido por ID
 @app.get("/pedidos/{pedido_id}", response_model=PedidoResponse, dependencies=[Depends(verificar_api_key)])
 def obtener_pedido(pedido_id: int, db: Session = Depends(get_db)):
     pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
@@ -224,12 +351,55 @@ def obtener_pedido(pedido_id: int, db: Session = Depends(get_db)):
     return pedido
 
 
-# 4. UPDATE - Actualizar estado del pedido
 @app.put("/pedidos/{pedido_id}", response_model=PedidoResponse, dependencies=[Depends(verificar_api_key)])
 def actualizar_pedido(pedido_id: int, datos: PedidoUpdate, db: Session = Depends(get_db)):
     pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail=f"Pedido con ID {pedido_id} no encontrado.")
+
+    transiciones = {
+        "CONFIRMADO": {"EN_CAMINO"},
+        "EN_CAMINO": {"ENTREGADO"},
+        "ENTREGADO": set(),
+    }
+    if datos.estado == pedido.estado:
+        return pedido
+    if datos.estado not in transiciones.get(pedido.estado, set()):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"No se puede cambiar el pedido de {pedido.estado} a {datos.estado}.",
+        )
+
+    estado_envio = {"EN_CAMINO": "EN_RUTA", "ENTREGADO": "ENTREGADO"}[datos.estado]
+    headers_internos = {"x-api-key": API_KEY_ESPERADA}
+    try:
+        resp_envio = obtener_envio_existente(pedido.id, headers_internos)
+        if resp_envio.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(status_code=409, detail="No existe un envío asociado a este pedido.")
+        if resp_envio.status_code != status.HTTP_200_OK:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=extraer_detalle_error(resp_envio, "No se pudo consultar el envío asociado."),
+            )
+
+        envio = resp_envio.json()
+        if envio["estado"] != estado_envio:
+            cambio = httpx.put(
+                f"{ENVIOS_URL}/envios/{envio['id']}",
+                json={"estado": estado_envio},
+                headers=headers_internos,
+                timeout=5.0,
+            )
+            if cambio.status_code != status.HTTP_200_OK:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=extraer_detalle_error(cambio, "No se pudo actualizar el estado del envío."),
+                )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El Servicio de Envíos no está disponible; el estado del pedido no fue modificado.",
+        ) from exc
 
     pedido.estado = datos.estado
     db.commit()
@@ -237,7 +407,6 @@ def actualizar_pedido(pedido_id: int, datos: PedidoUpdate, db: Session = Depends
     return pedido
 
 
-# 5. DELETE - Eliminar pedido
 @app.delete("/pedidos/{pedido_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(verificar_api_key)])
 def eliminar_pedido(pedido_id: int, db: Session = Depends(get_db)):
     pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()

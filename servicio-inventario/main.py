@@ -6,8 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy.orm import Session
 
-from database import ProductoDB, crear_tablas, get_db
-from schemas import ProductoCreate, ProductoUpdate, DescuentoStockRequest, ProductoResponse
+from database import ProductoDB, ReservaStockDB, crear_tablas, get_db
+from schemas import (
+    ProductoCreate,
+    ProductoUpdate,
+    DescuentoStockRequest,
+    ReservaStockRequest,
+    ProductoResponse,
+)
 
 load_dotenv(dotenv_path="../.env")
 API_KEY_ESPERADA = os.getenv("API_KEY", "novastore-soa-2026")
@@ -89,7 +95,7 @@ def actualizar_producto(producto_id: int, datos: ProductoUpdate, db: Session = D
     return producto
 
 
-# 5. OPERACIÓN DE NEGOCIO - Descontar existencias al confirmar un pedido
+# 5. OPERACIONES DE STOCK - Descontar o reservar existencias
 @app.patch("/productos/{producto_id}/descontar", response_model=ProductoResponse, dependencies=[Depends(verificar_api_key)])
 def descontar_stock(producto_id: int, solicitud: DescuentoStockRequest, db: Session = Depends(get_db)):
     producto = db.query(ProductoDB).filter(ProductoDB.id == producto_id).first()
@@ -104,6 +110,69 @@ def descontar_stock(producto_id: int, solicitud: DescuentoStockRequest, db: Sess
     producto.stock -= solicitud.cantidad
     db.commit()
     db.refresh(producto)
+    return producto
+
+
+@app.post("/productos/{producto_id}/reservas", response_model=ProductoResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(verificar_api_key)])
+def reservar_stock(producto_id: int, solicitud: ReservaStockRequest, db: Session = Depends(get_db)):
+    reserva = db.query(ReservaStockDB).filter(
+        ReservaStockDB.pedido_id == solicitud.pedido_id
+    ).first()
+    if reserva:
+        if reserva.producto_id != producto_id or reserva.cantidad != solicitud.cantidad:
+            raise HTTPException(status_code=409, detail="El pedido ya tiene una reserva diferente.")
+        if reserva.estado != "RESERVADA":
+            raise HTTPException(status_code=409, detail="La reserva del pedido ya fue liberada.")
+        producto = db.query(ProductoDB).filter(ProductoDB.id == producto_id).first()
+        if not producto:
+            raise HTTPException(status_code=404, detail=f"Producto con ID {producto_id} no encontrado.")
+        return producto
+
+    producto = db.query(ProductoDB).filter(ProductoDB.id == producto_id).first()
+    if not producto:
+        raise HTTPException(status_code=404, detail=f"Producto con ID {producto_id} no encontrado.")
+    stock_actualizado = db.query(ProductoDB).filter(
+        ProductoDB.id == producto_id,
+        ProductoDB.stock >= solicitud.cantidad,
+    ).update(
+        {ProductoDB.stock: ProductoDB.stock - solicitud.cantidad},
+        synchronize_session=False,
+    )
+    if not stock_actualizado:
+        db.rollback()
+        producto = db.query(ProductoDB).filter(ProductoDB.id == producto_id).first()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stock insuficiente. Disponible: {producto.stock}, solicitado: {solicitud.cantidad}."
+        )
+
+    db.add(ReservaStockDB(
+        pedido_id=solicitud.pedido_id,
+        producto_id=producto_id,
+        cantidad=solicitud.cantidad,
+        estado="RESERVADA",
+    ))
+    db.commit()
+    db.refresh(producto)
+    return producto
+
+
+@app.post("/productos/{producto_id}/reservas/{pedido_id}/liberar", response_model=ProductoResponse, dependencies=[Depends(verificar_api_key)])
+def liberar_reserva(producto_id: int, pedido_id: int, db: Session = Depends(get_db)):
+    reserva = db.query(ReservaStockDB).filter(
+        ReservaStockDB.pedido_id == pedido_id
+    ).first()
+    if not reserva or reserva.producto_id != producto_id:
+        raise HTTPException(status_code=404, detail="No existe una reserva para ese pedido y producto.")
+
+    producto = db.query(ProductoDB).filter(ProductoDB.id == producto_id).first()
+    if not producto:
+        raise HTTPException(status_code=404, detail=f"Producto con ID {producto_id} no encontrado.")
+    if reserva.estado == "RESERVADA":
+        producto.stock += reserva.cantidad
+        reserva.estado = "LIBERADA"
+        db.commit()
+        db.refresh(producto)
     return producto
 
 

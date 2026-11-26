@@ -20,6 +20,10 @@ class DescuentoStockRequest(BaseModel):
     cantidad: int = Field(..., gt=0, description="Cantidad de unidades a descontar", examples=[2])
 
 
+class ReservaStockRequest(DescuentoStockRequest):
+    pedido_id: int = Field(..., gt=0)
+
+
 class ProductoResponse(BaseModel):
     id: int
     nombre: str

@@ -20,6 +20,15 @@ class ProductoDB(Base):
     stock = Column(Integer, nullable=False)
 
 
+class ReservaStockDB(Base):
+    __tablename__ = "reservas_stock"
+
+    pedido_id = Column(Integer, primary_key=True)
+    producto_id = Column(Integer, nullable=False)
+    cantidad = Column(Integer, nullable=False)
+    estado = Column(String, default="RESERVADA", nullable=False)
+
+
 def crear_tablas():
     Base.metadata.create_all(bind=engine)
 

@@ -63,6 +63,7 @@
     .tag { padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; background: #e0e7ff; color: var(--primary); }
     .tag.cancel { background: #fee2e2; color: var(--err); }
     .tag.done { background: #dcfce7; color: var(--ok); }
+    .tag.review { background: #fef3c7; color: var(--warn); }
   </style>
 </head>
 <body>
@@ -178,6 +179,7 @@
     <!-- TABLA ENVIOS -->
     <div class="card">
       <h2>Logística y Guías de Envío (Base de datos: envios.db — Puerto 8002)</h2>
+      <div id="alertEnvios" class="alert" style="margin-top:0; margin-bottom:12px;"></div>
       <table>
         <thead>
           <tr><th>ID</th><th>Pedido #</th><th>Guía</th><th>Destinatario</th><th>Zona</th><th>Costo</th><th>Estado</th><th>Acción</th></tr>
@@ -308,7 +310,8 @@
         const tbody = document.getElementById("tablaPedidos");
         tbody.innerHTML = "";
         pedidos.forEach(p => {
-          const cls = p.estado === "CANCELADO" ? "cancel" : (p.estado === "CONFIRMADO" ? "done" : "");
+          const cls = p.estado === "CANCELADO" ? "cancel"
+            : (p.estado === "REQUIERE_REVISION" ? "review" : (p.estado === "CONFIRMADO" ? "done" : ""));
           tbody.innerHTML += `<tr>
             <td>${p.id}</td><td>${p.cliente}</td><td>${p.producto_nombre}</td><td>${p.cantidad}</td>
             <td>$${p.subtotal.toFixed(2)}</td><td>$${p.costo_envio.toFixed(2)}</td><td><strong>$${p.total.toFixed(2)}</strong></td>
@@ -335,9 +338,9 @@
         envios.forEach(env => {
           const cls = env.estado === "CANCELADO" ? "cancel" : (env.estado === "ENTREGADO" ? "done" : "");
           const btnSiguiente = env.estado === "PREPARANDO"
-            ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.id}, 'EN_RUTA')">Marcar En Ruta</button>`
+            ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.pedido_id}, 'EN_CAMINO')">Marcar En Ruta</button>`
             : (env.estado === "EN_RUTA"
-              ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.id}, 'ENTREGADO')">Marcar Entregado</button>`
+              ? `<button class="btn-sm" onclick="cambiarEstadoEnvio(${env.pedido_id}, 'ENTREGADO')">Marcar Entregado</button>`
               : "-");
           tbody.innerHTML += `<tr>
             <td>${env.id}</td><td>#${env.pedido_id}</td><td><code>${env.numero_guia}</code></td>
@@ -351,13 +354,20 @@
       }
     }
 
-    async function cambiarEstadoEnvio(id, nuevoEstado) {
-      await fetch(`${URL_ENV}/envios/${id}`, {
-        method: "PUT",
-        headers: getHeaders(),
-        body: JSON.stringify({ estado: nuevoEstado })
-      });
-      cargarEnvios();
+    async function cambiarEstadoEnvio(pedidoId, nuevoEstadoPedido) {
+      try {
+        const res = await fetch(`${URL_PED}/pedidos/${pedidoId}`, {
+          method: "PUT",
+          headers: getHeaders(),
+          body: JSON.stringify({ estado: nuevoEstadoPedido })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.detail || "No se pudo actualizar el estado."}`);
+        mostrarAlerta("alertEnvios", "ok", `Pedido #${pedidoId} y envío actualizados: ${nuevoEstadoPedido}.`);
+        cargarTodo();
+      } catch (err) {
+        mostrarAlerta("alertEnvios", "err", err.message);
+      }
     }
 
     document.getElementById("formProducto").addEventListener("submit", async (e) => {
