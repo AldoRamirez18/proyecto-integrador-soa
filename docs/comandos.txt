@@ -1,0 +1,12 @@
+cd servicio-inventario
+uvicorn main:app --port 8001 --reload
+
+cd servicio-envios
+uvicorn main:app --port 8002 --reload
+
+cd servicio-pedidos
+uvicorn main:app --port 8003 --reload
+
+cd cliente
+python -m http.server 8000
+http://127.0.0.1:8000

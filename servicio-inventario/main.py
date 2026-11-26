@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from database import ProductoDB, crear_tablas, get_db
 from schemas import ProductoCreate, ProductoUpdate, DescuentoStockRequest, ProductoResponse
 
-# Cargar variables de entorno desde la raíz del proyecto
 load_dotenv(dotenv_path="../.env")
 API_KEY_ESPERADA = os.getenv("API_KEY", "novastore-soa-2026")
 
@@ -46,7 +45,7 @@ def crear_producto(producto: ProductoCreate, db: Session = Depends(get_db)):
     existente = db.query(ProductoDB).filter(ProductoDB.nombre == producto.nombre).first()
     if existente:
         raise HTTPException(status_code=400, detail="Ya existe un producto registrado con ese nombre.")
-    
+
     nuevo_producto = ProductoDB(**producto.model_dump())
     db.add(nuevo_producto)
     db.commit()
@@ -76,7 +75,13 @@ def actualizar_producto(producto_id: int, datos: ProductoUpdate, db: Session = D
     if not producto:
         raise HTTPException(status_code=404, detail=f"Producto con ID {producto_id} no encontrado.")
 
-    for campo, valor in datos.model_dump(exclude_unset=True).items():
+    cambios = datos.model_dump(exclude_unset=True)
+    if "nombre" in cambios and cambios["nombre"] != producto.nombre:
+        duplicado = db.query(ProductoDB).filter(ProductoDB.nombre == cambios["nombre"]).first()
+        if duplicado:
+            raise HTTPException(status_code=400, detail="Ya existe otro producto con ese nombre.")
+
+    for campo, valor in cambios.items():
         setattr(producto, campo, valor)
 
     db.commit()
