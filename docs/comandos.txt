@@ -34,3 +34,7 @@ URLs:
     Pedidos Swagger:      http://127.0.0.1:8003/docs
 
 La API_KEY de .env debe coincidir con x-api-key en el cliente.
+API_KEY=novastore-soa-2026
+
+Python y FastAPI para los servicios; REST/HTTP y JSON para integrarlos; Pydantic para validar; 
+HTTP para las llamadas entre servicios; SQLAlchemy y SQLite para persistencia; y HTML, CSS y JavaScript para la interfaz.
