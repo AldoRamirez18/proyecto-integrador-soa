@@ -1,12 +1,36 @@
-cd servicio-inventario
-uvicorn main:app --port 8001 --reload
+Preparación (una vez, desde la raíz del proyecto):
+    py -m venv venv
+    .\venv\Scripts\Activate.ps1
+    pip install -r requirements.txt
+    Copy-Item .env.example .env
 
-cd servicio-envios
-uvicorn main:app --port 8002 --reload
+Inicia cada componente en una terminal PowerShell separada desde la raíz.
+Deja las terminales abiertas mientras usas el sistema.
 
-cd servicio-pedidos
-uvicorn main:app --port 8003 --reload
+Terminal 1 - Servicio de Inventario:
+    .\venv\Scripts\Activate.ps1
+    Set-Location servicio-inventario
+    uvicorn main:app --host 127.0.0.1 --port 8001 --reload
 
-cd cliente
-python -m http.server 8000
-http://127.0.0.1:8000
+Terminal 2 - Servicio de Envíos:
+    .\venv\Scripts\Activate.ps1
+    Set-Location servicio-envios
+    uvicorn main:app --host 127.0.0.1 --port 8002 --reload
+
+Terminal 3 - Servicio de Pedidos:
+    .\venv\Scripts\Activate.ps1
+    Set-Location servicio-pedidos
+    uvicorn main:app --host 127.0.0.1 --port 8003 --reload
+
+Terminal 4 - Cliente web:
+    .\venv\Scripts\Activate.ps1
+    Set-Location cliente
+    python -m http.server 8000 --bind 127.0.0.1
+
+URLs:
+    Cliente:              http://127.0.0.1:8000
+    Inventario Swagger:   http://127.0.0.1:8001/docs
+    Envíos Swagger:       http://127.0.0.1:8002/docs
+    Pedidos Swagger:      http://127.0.0.1:8003/docs
+
+La API_KEY de .env debe coincidir con x-api-key en el cliente.
